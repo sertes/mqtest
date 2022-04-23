@@ -1,15 +1,1 @@
-/* style.css */
-
-* {
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-}
-
-.container {
-    display: flex;
-}
-
-.graph {
-    border: 1px solid gray;
-    width: 320px;
-    height: 240px;
-}
+/* moved to index.html to speed up */
