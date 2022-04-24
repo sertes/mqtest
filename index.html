@@ -58,16 +58,63 @@
 </div>
 <div><button id="clearIDB">Clear IndexedDB</button></div>
 <script>
+    // import React from 'react';
+    // import ReactDOM from 'react-dom';
+    import './index.css';
+    // import App from './App';
+    //
+    // ReactDOM.render(
+    //   <React.StrictMode>
+    //     <App />
+    //   </React.StrictMode>,
+    //   document.getElementById('root')
+    // );
+
+
     // TODO: check every requirement from MQ
     // TODO: check against NATA rules
 
     ///////////////////////////////////////////////////////////////////////////////
     // CONFIGURATION
+    const URL_TEMPERATURE = './temperature.json?r=' + Math.random()
+    const URL_PRECIPITATION = './precipitation.json?r=' + Math.random()
+
     const DB_NAME = 'store'
     const TABLE_TEMPER = 'temperature'
     const TABLE_PREC = 'precipitation'
+    const SELECT_TROTTLE_TIME = 180 // select boxes trottle time in milliseconds
 
-    let myIDB;
+    let myIDBInstance;
+
+    const fetchJsonData = {}
+    const fetchLoaded = {}
+    fetchLoaded[TABLE_TEMPER] = false
+    fetchLoaded[TABLE_PREC] = false
+
+    let applicationMode = TABLE_TEMPER
+
+    function trottle(f, delay) {
+        let myTrottled = false, myArgs, myContext
+        function trottled() {
+            if (myTrottled) {
+                myArgs = arguments
+                myContext = this
+                return
+            }
+
+            f.apply(this, arguments)
+            myTrottled = true
+
+            setTimeout(() => {
+                myTrottled = false
+                if (myArgs) {
+                    trottled.apply(myContext, myArgs)
+                    myContext = myArgs = null
+                }
+            }, delay)
+        }
+        return trottled
+    }
 
     function fillSelect(id, min, max, selected) {
         const mySelect = document.getElementById(id)
@@ -111,7 +158,7 @@
         const myValuesY = {}
         const myValuesX = []
 
-        const myPixelFactor = 1.5
+        const myPixelFactor = 1
         const myAveragingInterval = Math.round(myLabels.length / myGraph.width) * myPixelFactor
 
         // count min max
@@ -135,7 +182,7 @@
                 myCnt = 0
             }
 
-            let myValue = dataObject[myLabels[i]]?.['v']
+            let myValue = dataObject[myLabels[i]]
             if (myValue) {
                 myAvgSum = (myAvgSum) ? (myAvgSum + myValue) : myValue
                 myCnt += 1
@@ -149,12 +196,20 @@
         myCtx.lineTo(myGraph.width, getY(0))
         myCtx.stroke()
 
+        // myCtx.font = "14px serif";
+        myCtx.fillText('' + Math.round(myMax), 5, 14);
+        myCtx.fillText('' + Math.round(myMin), 5, myGraph.height - 5);
+
         function getY(value) {
             const myStrengthFactor = myGraph.height / (myMax - myMin)
-            return (0 - myMin + value) * myStrengthFactor
+            return myGraph.height - (0 - myMin + value) * myStrengthFactor
         }
 
-        let myX = 0;
+        function getX(n, count) {
+            return (myGraph.width / count) * n
+        }
+
+        // let myX = 0;
         myCtx.beginPath();
         myCtx.moveTo(0, myGraph.height / 2);
         const myPlottingTime = Date.now()
@@ -164,22 +219,196 @@
             let myValue = myValuesY[myValuesX[i]]
             if(myValue) {
                 if (myGapFound) {
-                    myCtx.moveTo(myX += myPixelFactor, getY(myValue))
+                    // myCtx.moveTo(myX += myPixelFactor, getY(myValue))
+                    myCtx.moveTo(getX(i, myValuesX.length), getY(myValue))
                     myGapFound = false
                 } else {
-                    myCtx.lineTo(myX += myPixelFactor, getY(myValue))
+                    myCtx.lineTo(getX(i, myValuesX.length), getY(myValue))
+                    // myCtx.lineTo(myX += myPixelFactor, getY(myValue))
                 }
 
             } else {
                 myGapFound = true;
-                console.log('gap found at:', myValuesX[i])
+                // console.log('gap found at:', myValuesX[i])
             }
         }
         myCtx.stroke();
         console.log('plotting time: ', Date.now() - myPlottingTime, ' msec')
+        console.log('TOTAL TIME ', Date.now() - myStartFetching, ' msec')
     }
 
+    let onSelectChange = trottle((event) => {
+        console.log('onSelectChange')
+
+        function prepareDataAndDraw (myYearFrom, myYearTo, rawData) {
+            const myDataObject = {}
+            rawData.forEach(el => {
+                myDataObject[el.t] = el.v
+            })
+            drawGraph(myYearFrom, myYearTo, myDataObject)
+        }
+
+        const mySelectFrom = document.getElementById('year_from')
+        const mySelectTo = document.getElementById('year_to')
+        if (mySelectFrom.value > mySelectTo.value && event.target === mySelectFrom) {
+            mySelectTo.value = mySelectFrom.value
+        } else if (mySelectTo.value < mySelectFrom.value && event.target === mySelectTo) {
+            mySelectFrom.value = mySelectTo.value
+        }
+
+        let myYearFrom = mySelectFrom.value
+        let myYearTo = mySelectTo.value
+        console.log(myYearFrom, myYearTo)
+
+
+        if (localStorage.getItem(applicationMode) !== '1') {
+            // use fetch data
+            console.log('using fetch data')
+            prepareDataAndDraw(myYearFrom, myYearTo, fetchJsonData[applicationMode])
+        } else {
+            console.log('using idb data')
+            // use idb data
+            if (!myIDBInstance) return
+            const myTransactionRead = myIDBInstance.transaction(applicationMode, 'readonly')
+            const myTable = myTransactionRead.objectStore(applicationMode)
+
+            // Query the data
+            const myIdbResult = myTable.getAll(
+                IDBKeyRange.bound('' + myYearFrom + '-01-01', '' + myYearTo + '-12-31', false, false)
+            )
+
+            myIdbResult.onsuccess = () => {
+                prepareDataAndDraw(myYearFrom, myYearTo, myIdbResult.result)
+            }
+        }
+
+
+    }, SELECT_TROTTLE_TIME)
+
+    let myStartFetching = Date.now()
+
+    const idbPromise = new Promise((resolve, reject) => {
+        // init DB
+        let openRequest = window.indexedDB.open(DB_NAME, 2)
+        openRequest.onupgradeneeded = (event) => {
+            console.log('upgrading database')
+            let db = event.target.result
+            // let db = openRequest.result;
+            if (!db.objectStoreNames.contains(TABLE_TEMPER)) {
+                console.log('creating table', TABLE_TEMPER)
+                // const TEMPER =
+                db.createObjectStore(TABLE_TEMPER, {keyPath: 't'})
+                // TEMPER.createIndex('IDX_YEAR', 'year')
+            }
+            if (!db.objectStoreNames.contains(TABLE_PREC)) {
+                console.log('creationg table', TABLE_PREC)
+                const PREC = db.createObjectStore(TABLE_PREC, {keyPath: 't'})
+                PREC.createIndex('IDX_YEAR', 'year')
+            }
+        };
+
+        openRequest.onerror = (event) => {
+            // console.error('Error', event.target.result.error);
+            console.error('IDB Error', event.target.errorCode)
+            reject('IDB Error: ', event.target.errorCode)
+        }
+
+        openRequest.onsuccess = (event) => {
+            myIDBInstance = event.target.result
+            // const db = openRequest
+            console.log('connection established to:', '"' + DB_NAME + '"')
+
+            // myIDBInstance.onerror = (event) => {
+            //     console.log('db error', myIDBInstance.error)
+            // }
+
+            resolve(myIDBInstance)
+        };
+    })
+
+    function storeDataToIdb(tableName, jsonData) {
+        // fill IDB if connection ready
+        idbPromise.then((idbInstance) => {
+            console.log('json data length: ', jsonData.length)
+            const myTransaction = idbInstance.transaction(tableName, 'readwrite')
+
+            const myTxTemperTableRW = myTransaction.objectStore(tableName)
+
+            // TODO: make promise for filling IDB.
+            const myStartInserting1 = Date.now()
+            console.log('inserting...', tableName)
+            jsonData.forEach((element) => {
+                myTxTemperTableRW.put(element)
+            })
+
+            localStorage.setItem(tableName, '1')
+            fetchJsonData[tableName] = undefined
+            console.log('IDB inserting time: ', Date.now() - myStartInserting1, ' msec')
+        })
+    }
+
+    function getYearMinMaxSlowButPrettier(jsonData) {
+        const myArray = jsonData.map((el) => parseInt(el.t.substring(0, 4), 10))
+        return [Math.min(...myArray), Math.max(...myArray)]
+    }
+
+    function getYearMinMax(jsonData) {
+        let myYearFrom = Number.NaN
+        let myYearTo = Number.NaN
+        jsonData.forEach((element) => {
+            const myYear = parseInt(element.t.substring(0, 4), 10)
+            myYearFrom = Math.min(myYearFrom, myYear) || myYear
+            myYearTo = Math.max(myYearTo, myYear) || myYear
+        })
+        return [myYearFrom, myYearTo]
+    }
+
+    function fetchAndStorePrecipitation() {
+        // load and store precipitation
+        fetch(URL_PRECIPITATION).then(
+            (response) => response.json()
+        ).then((jsonData) => {
+            fetchLoaded[TABLE_PREC] = true
+            fetchJsonData[TABLE_PREC] = jsonData
+
+            const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+            localStorage.setItem('precipYearMin', '' + myYearFrom)
+            localStorage.setItem('precipYearMax', '' + myYearTo)
+            setTimeout(() => storeDataToIdb(TABLE_PREC, jsonData), 0)
+        })
+    }
+
+    window.addEventListener('load', function () {
+        fetch(URL_TEMPERATURE).then(
+            (response) => response.json()
+        ).then((jsonData) => {
+            fetchLoaded[TABLE_TEMPER] = true
+            fetchJsonData[TABLE_TEMPER] = jsonData
+            console.log('fetch time: ', Date.now() - myStartFetching, ' msec')
+
+            const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+
+            localStorage.setItem('temperYearMin', '' + myYearFrom)
+            localStorage.setItem('temperYearMax', '' + myYearTo)
+
+            drawGraph(myYearFrom, myYearTo, jsonData.reduce((obj, el) => (obj[el.t] = el.v, obj), {}))
+
+            fillSelect('year_from', myYearFrom, myYearTo, myYearFrom)
+            fillSelect('year_to', myYearFrom, myYearTo, myYearTo)
+
+            setTimeout(() => storeDataToIdb(TABLE_TEMPER, jsonData), 0)
+        }).then(() => {
+            fetchAndStorePrecipitation()
+        })
+
+        document.getElementById('year_from').addEventListener('change', onSelectChange)
+        document.getElementById('year_to').addEventListener('change', onSelectChange)
+    })
+
     document.getElementById('clearIDB').addEventListener('click', event => {
+        console.log('local storage cleanup')
+        localStorage.clear()
+
         console.log('database ', DB_NAME, ' deleting...')
 
         const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
@@ -194,197 +423,6 @@
 
         event.preventDefault()
     })
-
-    function onSelectChange(event) {
-        const mySelectFrom = document.getElementById('year_from')
-        const mySelectTo = document.getElementById('year_to')
-        if (mySelectFrom.value > mySelectTo.value && event.target === mySelectFrom) {
-            mySelectTo.value = mySelectFrom.value
-        } else if (mySelectTo.value < mySelectFrom.value && event.target === mySelectTo) {
-            mySelectFrom.value = mySelectTo.value
-        }
-
-        if (!myIDB) return
-        ///// TODO: make new transaction for reading // DONE but doesnt help/ same request time
-        const myTransactionRead = myIDB.transaction(TABLE_TEMPER, 'readonly')
-        myTransactionRead.onabort = function () {
-            console.log('myTransactionRead transaction error ', myTransactionRead.error)
-        };
-
-        const myTxTemperTableRead = myTransactionRead.objectStore(TABLE_TEMPER)
-
-        myTxTemperTableRead.onerror = function (event) {
-            console.log('myTxTemperTableRead table error: ', myTxTemperTableRead.error)
-        }
-
-        const myStartQuery = Date.now()
-        let yearFrom = mySelectFrom.value
-        let yearTo = mySelectTo.value
-        // Query the data
-        const get1881 = myTxTemperTableRead.getAll(
-            IDBKeyRange.bound(yearFrom, yearTo, false, false)
-        )
-
-        get1881.onsuccess = function () {
-            console.log('IDB query time: ', Date.now() - myStartQuery, ' msec')
-            // console.log(get1881.result) // 1881
-
-            const myDataObject = {}
-            get1881.result.forEach(el => {
-                Object.assign(myDataObject, el['data'])
-            })
-            drawGraph(yearFrom, yearTo, myDataObject)
-            console.log('TOTAL TIME ', Date.now() - myStartFetching, ' msec')
-        }
-
-        // fill year dates
-        // console.log(fillYearDates(1881))
-
-        // drawGraph(jsonData)
-
-    }
-
-    let myStartFetching = Date.now()
-
-    window.addEventListener('load', function () {
-        console.log('page loaded')
-
-        let myStartFetching = Date.now()
-        fetch('./temperature.json?r=' + myStartFetching)
-            .then((response) => {
-                return response.json()
-            })
-            .then((jsonData) => {
-                console.log('fetch time: ', Date.now() - myStartFetching, ' msec')
-                // init DB
-                let openRequest = window.indexedDB.open(DB_NAME, 2)
-
-                openRequest.onupgradeneeded = (event) => {
-                    console.log('upgrading database')
-                    let db = event.target.result
-                    // let db = openRequest.result;
-                    if (!db.objectStoreNames.contains(TABLE_TEMPER)) {
-                        console.log('creating table', TABLE_TEMPER)
-                        // const TEMPER =
-                        db.createObjectStore(TABLE_TEMPER)
-                        // TEMPER.createIndex('IDX_YEAR', 'year')
-                    }
-                    if (!db.objectStoreNames.contains(TABLE_PREC)) {
-                        console.log('creationg table', TABLE_PREC)
-                        const PREC = db.createObjectStore(TABLE_PREC)
-                        PREC.createIndex('IDX_YEAR', 'year')
-                    }
-                };
-
-                openRequest.onerror = (event) => {
-                    // console.error('Error', event.target.result.error);
-                    console.error('Error', event.target.errorCode)
-                }
-
-                openRequest.onsuccess = (event) => {
-                    myIDB = event.target.result
-                    // const db = openRequest
-                    console.log('connection established to: "', DB_NAME, '"')
-
-                    console.log('json data length: ', jsonData.length)
-
-                    // myIDB.onerror = (event) => {
-                    //     console.log('db error', myIDB.error)
-                    // }
-
-                    const tx = myIDB.transaction(TABLE_TEMPER, 'readwrite')
-                    tx.onabort = function () {
-                        console.log('transaction error ', tx.error)
-                    }
-
-                    const myTxTemperTableRW = tx.objectStore(TABLE_TEMPER)
-
-                    myTxTemperTableRW.onerror = function (event) {
-                        console.log('temperature RW transaction table error: ', myTxTemperTableRW.error)
-                    }
-
-                    const myStartInserting1 = Date.now()
-                    console.log('inserting...')
-                    jsonData.forEach((element) => {
-                        myTxTemperTableRW.add(element.v, element.t)
-                        // myTxTemperTableRW.put(element.v, parseInt(element.t.split('-').join(), 10))
-                    })
-                    console.log('IDB inserting time: ', Date.now() - myStartInserting1, ' msec')
-                    return
-
-
-                    // {
-                    //      '1881': {
-                    //          'year': '1881',
-                    //          'data': {
-                    //              '1881-01-01': {'t': '1881-01-01', 'v': 2.5}
-                    //              '1881-01-02': {'t': '1881-01-02', 'v': 3.0}
-                    //              '1881-01-03': {'t': '1881-01-03', 'v': 4.5}
-                    //              ......
-                    //          }
-                    //      },
-                    // }
-                    const idbTemperData = {}
-
-                    // prepare data for IDB
-                    jsonData.forEach((element) => {
-                        // element year
-                        element.year = parseInt(element.t.substring(0, 4), 10)
-                        idbTemperData[element.year] = idbTemperData[element.year] || { year: element.year, data: {}}
-                        idbTemperData[element.year]['data'][element.t] = element
-                    })
-
-                    // console.log(idbTemperData)
-
-                    // prepare for the first FAST run and draw graph
-                    // {
-                    //    '1881-01-01': {'t': '1881-01-01', 'v': 2.5}
-                    //    '1881-01-02': {'t': '1881-01-02', 'v': 3.0}
-                    //    '1881-01-03': {'t': '1881-01-03', 'v': 4.5}
-                    //    ......
-                    // }
-                    const myDataObject = {}
-                    let myYearFrom = Number.NaN
-                    let myYearTo = Number.NaN
-                    Object.entries(idbTemperData).forEach(el => {
-                        const [year, value] = el
-                        myYearFrom = Math.min(myYearFrom, parseInt(year, 10)) || year
-                        myYearTo = Math.max(myYearTo, parseInt(year, 10)) || year
-                        Object.assign(myDataObject, value['data']);
-                    })
-                    drawGraph(myYearFrom, myYearTo, myDataObject)
-                    console.log('min dataset year:', myYearFrom)
-                    console.log('max dataset year:', myYearTo)
-
-                    const myStartPopulatingSelects = Date.now()
-                    console.log('populating selects...')
-                    fillSelect('year_from', myYearFrom, myYearTo, myYearFrom)
-                    fillSelect('year_to', myYearFrom, myYearTo, myYearTo)
-                    console.log('populating selects time: ', Date.now() - myStartPopulatingSelects, ' msec')
-
-                    console.log('TOTAL TIME ', Date.now() - myStartFetching, ' msec')
-                    console.log('ULTRA TOTAL TIME ', Date.now() - document.myStartTime, ' msec')
-
-                    const myStartInserting = Date.now()
-                    console.log('inserting...')
-                    Object.entries(idbTemperData).forEach(el => {
-                        const [, value] = el
-                        myTxTemperTableRW.put(value)
-                    })
-                    console.log('IDB inserting time: ', Date.now() - myStartInserting, ' msec')
-
-                    // Close the db when the transaction is done
-                    // tx.oncomplete = function() {
-                    //     db.close();
-                    // };
-
-                };
-            })
-
-        document.getElementById('year_from').addEventListener('change', onSelectChange)
-        document.getElementById('year_to').addEventListener('change', onSelectChange)
-
-    });
 </script>
 </body>
 </html>
