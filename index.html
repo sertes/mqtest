@@ -58,21 +58,9 @@
 </div>
 <div><button id="clearIDB">Clear IndexedDB</button></div>
 <script>
-    // import React from 'react';
-    // import ReactDOM from 'react-dom';
-    import './index.css';
-    // import App from './App';
-    //
-    // ReactDOM.render(
-    //   <React.StrictMode>
-    //     <App />
-    //   </React.StrictMode>,
-    //   document.getElementById('root')
-    // );
-
-
     // TODO: check every requirement from MQ
     // TODO: check against NATA rules
+    // TODO: precipitation not selected from IDB!!!
 
     ///////////////////////////////////////////////////////////////////////////////
     // CONFIGURATION
@@ -84,12 +72,337 @@
     const TABLE_PREC = 'precipitation'
     const SELECT_TROTTLE_TIME = 180 // select boxes trottle time in milliseconds
 
-    let myIDBInstance;
+    class Adapter {
+        constructor() {
+            if (typeof Adapter.instance === 'object') {
+                return Adapter.instance
+            }
+            this.idbInstancePromise = undefined
+            Adapter.instance = this
+            return Adapter.instance
+        }
 
-    const fetchJsonData = {}
-    const fetchLoaded = {}
-    fetchLoaded[TABLE_TEMPER] = false
-    fetchLoaded[TABLE_PREC] = false
+        async getConnection() {
+            if (typeof this.idbInstancePromise === 'undefined') {
+                this.idbInstancePromise = new Promise((resolve, reject) => {
+                    // init DB
+                    let openRequest = window.indexedDB.open(DB_NAME, 1)
+                    openRequest.onupgradeneeded = (event) => {
+                        console.log('upgrading database...')
+                        let db = event.target.result
+                        if (!db.objectStoreNames.contains(TABLE_TEMPER)) {
+                            console.log('creating table', TABLE_TEMPER)
+                            db.createObjectStore(TABLE_TEMPER, {keyPath: 't'})
+                        }
+                        if (!db.objectStoreNames.contains(TABLE_PREC)) {
+                            console.log('creationg table', TABLE_PREC)
+                            db.createObjectStore(TABLE_PREC, {keyPath: 't'})
+                        }
+                    }
+
+                    openRequest.onerror = (event) => {
+                        console.error('IDB Error', event.target.errorCode)
+                        reject('IDB Error: ', event.target.errorCode)
+                    }
+
+                    openRequest.onsuccess = (event) => {
+                        myIDBInstance = event.target.result
+                        console.log('connection established to:', '"' + DB_NAME + '"')
+                        resolve(myIDBInstance)
+                    }
+                })
+            }
+            return this.idbInstancePromise
+        }
+    }
+
+    class Model {
+        constructor(params) {
+            this.name = params.name
+            this.url = params.url
+
+            this.loaded = false
+            this.storingPromise = false
+            this.stored = localStorage.getItem(`${this.name}_stored`) === 'stored'
+        }
+
+        get yearMin() {
+            return parseInt(localStorage.getItem(`${this.name}_YearMin`), 10) || -Infinity
+        }
+
+        set yearMin(value) {
+            localStorage.setItem(`${this.name}_YearMin`, value)
+        }
+
+        get yearMax() {
+            return parseInt(localStorage.getItem(`${this.name}_YearMax`), 10) || Infinity
+        }
+
+        set yearMax(value) {
+            localStorage.setItem(`${this.name}_YearMax`, value)
+        }
+
+        #getYearMinMax(json) {
+            let yearFrom = Infinity
+            let yearTo = -Infinity
+            json.forEach((element) => {
+                const myYear = parseInt(element.t.substring(0, 4), 10)
+                yearFrom = Math.min(yearFrom, myYear)
+                yearTo = Math.max(yearTo, myYear)
+            })
+            return [yearFrom, yearTo]
+        }
+
+        async #storeDataToIdb(json) {
+            if (this.storingPromise === false) {
+                // fill IDB then IDB connection ready
+                this.storingPromise = new Adapter().getConnection().then((idbInstance) => {
+                    return new Promise((resolve, reject) => {
+                        const myTransaction = idbInstance.transaction(this.name, 'readwrite')
+                        const myTable = myTransaction.objectStore(this.name)
+
+                        myTransaction.oncomplete = () => {
+                            localStorage.setItem(`${this.name}_stored`, 'stored')
+                            resolve()
+                        }
+
+                        myTransaction.onabort = () => {
+                            reject(myTransaction.error)
+                        }
+
+                        // TODO: make promise for filling IDB.
+                        const myStartInserting1 = Date.now()
+                        console.log('inserting...', this.name)
+                        json.forEach((element) => {
+                            myTable.put(element)
+                        })
+                        console.log('IDB inserting time: ', Date.now() - myStartInserting1, ' msec')
+                    })
+                })
+            }
+            return this.storingPromise
+        }
+
+        async get(yearFrom, yearTo) {
+            yearFrom = yearFrom || this.yearMin
+            yearTo = yearTo || this.yearMax
+
+            const reduceFn = (obj, el) => (obj[el.t] = el.v, obj)
+
+            // super lazy load
+            if (this.stored) {
+                // select from IDB
+                const myIDBInstance = await new Adapter().getConnection()
+                return new Promise((resolve, reject) => {
+                    let myIdbFetching = Date.now()
+                    const myTransactionRead = myIDBInstance.transaction(this.name, 'readonly')
+                    const myTable = myTransactionRead.objectStore(this.name)
+                    // Query the data
+                    const myIdbResult = myTable.getAll(IDBKeyRange.bound(`${yearFrom}-01-01`, `${yearTo}-12-31`, false, false))
+                    myIdbResult.onsuccess = () => {
+                        console.log('IDB fetching time: ', Date.now() - myIdbFetching, ' msec')
+                        resolve(myIdbResult.result.reduce(reduceFn, {}))
+                    }
+                })
+            } else if (this.loaded === false) {
+                this.loaded = fetch(this.url).then((result) => result.json())
+            }
+
+            // loading started but not ended
+            return this.loaded.then((json) =>  {
+                const [myYearFrom, myYearTo] = this.#getYearMinMax(json)
+                this.yearMin = myYearFrom
+                this.yearMax = myYearTo
+                // setTimeout(() => this.#storeDataToIdb(json), 0)
+                this.#storeDataToIdb(json)
+                // TODO: possible should be filtered
+                return json.reduce(reduceFn, {})
+            })
+        }
+    }
+
+    class View {
+        constructor(params) {
+            this.mode = params.mode || TABLE_TEMPER
+            this.modeChangeHandler = params.modeChangeHandler
+            this.yearChangeHandler = params.yearChangeHandler
+
+            document.getElementById('year_from').addEventListener('change', this.onSelectChangeHandler())
+            document.getElementById('year_to').addEventListener('change', this.onSelectChangeHandler())
+            document.querySelectorAll('#button_temper, #button_precip').forEach((el) => el.addEventListener('click', this.onButtonClickHandler.bind(this)))
+        }
+
+        // draw graph
+        drawGraph(yearFrom, yearTo, dataObject) {
+            const myGraph = document.getElementById('graph')
+            const myCtx = myGraph.getContext('2d')
+            myCtx.clearRect(0, 0, myGraph.width, myGraph.height)
+            myCtx.strokeRect(0, 0, myGraph.width, myGraph.height)
+
+            const myLabels = fillYearDates(yearFrom, yearTo)
+            const myValuesY = {}
+            const myValuesX = []
+
+            console.log('from', yearFrom, 'to', yearTo)
+
+            const myPixelFactor = 1
+            const myAveragingInterval = Math.round(myLabels.length / myGraph.width) * myPixelFactor
+
+            // count min max
+            let myMin = Number.NaN
+            let myMax = Number.NaN
+            let myAvgSum = Number.NaN
+            let myCnt = 0
+            const myMinMaxCount = Date.now()
+            for (let i = 0; i < myLabels.length; i += 1) {
+                let myValue = dataObject[myLabels[i]]
+                if (typeof myValue !== 'undefined') {
+                    myAvgSum = (!Number.isNaN(myAvgSum)) ? (myAvgSum + myValue) : myValue
+                    myCnt += 1
+                }
+
+                if (i % myAveragingInterval === 0) {
+                    myValuesX.push(myLabels[i]);
+
+                    let myAvgValue = (myCnt !== 0) ? myAvgSum / myCnt : Number.NaN
+                    if (!Number.isNaN(myAvgValue)) {
+                        myValuesY[myLabels[i]] = myAvgValue
+                        myMin = (!Number.isNaN(myMin)) ? Math.min(myMin, myAvgValue) : myAvgValue
+                        myMax = (!Number.isNaN(myMax)) ? Math.max(myMax, myAvgValue) : myAvgValue
+                    }
+
+                    myAvgSum = Number.NaN
+                    myCnt = 0
+                }
+            }
+            console.log('minmax count time: ', Date.now() - myMinMaxCount, ' msec', 'min:', myMin, 'max:', myMax)
+
+            //draw x axis
+            myCtx.beginPath()
+            myCtx.moveTo(0, getY(0))
+            myCtx.lineTo(myGraph.width, getY(0))
+            myCtx.stroke()
+
+            // myCtx.font = "14px serif";
+            myCtx.fillText('' + Math.round(myMax), 5, 14);
+            myCtx.fillText('' + Math.round(myMin), 5, myGraph.height - 5);
+
+            function getY(value) {
+                const myStrengthFactor = myGraph.height / (myMax - myMin)
+                return myGraph.height - (0 - myMin + value) * myStrengthFactor
+            }
+
+            function getX(n, count) {
+                return (myGraph.width / count) * n
+            }
+
+            // let myX = 0;
+            myCtx.beginPath();
+            myCtx.moveTo(0, myGraph.height / 2);
+            const myPlottingTime = Date.now()
+
+            let myGapFound = true
+            for (let i = 0; i < myValuesX.length; i += 1) {
+                let myValue = myValuesY[myValuesX[i]]
+                if(!Number.isNaN(myValue)) {
+                    if (myGapFound) {
+                        // myCtx.moveTo(myX += myPixelFactor, getY(myValue))
+                        myCtx.moveTo(getX(i, myValuesX.length), getY(myValue))
+                        myGapFound = false
+                    } else {
+                        myCtx.lineTo(getX(i, myValuesX.length), getY(myValue))
+                        // myCtx.lineTo(myX += myPixelFactor, getY(myValue))
+                    }
+
+                } else {
+                    myGapFound = true;
+                    console.log('gap found at:', myValuesX[i])
+                }
+            }
+            myCtx.stroke();
+            console.log('plotting time: ', Date.now() - myPlottingTime, ' msec')
+            console.log('TOTAL TIME ', Date.now() - myStartFetching, ' msec')
+        }
+
+        refillSelect(type, min, max, selected) {
+            const mySelect = document.getElementById(type === 'yearFrom' ? 'year_from' : 'year_to')
+            mySelect.length = 0 // remove select options
+            const myFragment = document.createDocumentFragment()
+            for (let i = parseInt(min, 10); i <= parseInt(max, 10); i += 1) {
+                const mySelectOption = document.createElement('option')
+                mySelectOption.value = mySelectOption.text = '' + i
+                myFragment.appendChild(mySelectOption)
+            }
+            mySelect.appendChild(myFragment)
+            mySelect.value = selected
+        }
+
+        updateButtons() {
+            document.getElementById('button_temper').disabled = (this.mode === TABLE_TEMPER)
+            document.getElementById('button_precip').disabled = (this.mode === TABLE_PREC)
+        }
+
+        onSelectChangeHandler() {
+            return trottle((event) => {
+                const mySelectFrom = document.getElementById('year_from')
+                const mySelectTo = document.getElementById('year_to')
+                if (mySelectFrom.value > mySelectTo.value && event.target === mySelectFrom) {
+                    mySelectTo.value = mySelectFrom.value
+                } else if (mySelectTo.value < mySelectFrom.value && event.target === mySelectTo) {
+                    mySelectFrom.value = mySelectTo.value
+                }
+                if (this.yearChangeHandler) this.yearChangeHandler(mySelectFrom.value, mySelectTo.value)
+            }, SELECT_TROTTLE_TIME)
+        }
+
+        onButtonClickHandler() {
+            this.mode = (this.mode === TABLE_TEMPER) ? TABLE_PREC : TABLE_TEMPER
+
+            this.updateButtons()
+
+            if (this.modeChangeHandler) this.modeChangeHandler(this.mode)
+        }
+    }
+
+    class Controller {
+        temeratureModel = new Model({
+            name: TABLE_TEMPER,
+            url: URL_TEMPERATURE
+        })
+
+        percipitationModel = new Model({
+            name: TABLE_PREC,
+            url: URL_PRECIPITATION
+        })
+
+        view = new View({
+            mode: TABLE_TEMPER,
+            modeChangeHandler: this.modeChangeHandler.bind(this),
+            yearChangeHandler: this.yearChangeHandler.bind(this)
+        })
+
+        constructor() {
+            this.modeChangeHandler(TABLE_TEMPER)
+        }
+
+        modeChangeHandler(mode) {
+            this.view.updateButtons()
+            this.curModel = (mode === TABLE_TEMPER) ? this.temeratureModel : this.percipitationModel
+            this.curModel.get().then((obj) => {
+                this.view.refillSelect('yearFrom', this.curModel.yearMin, this.curModel.yearMax, this.curModel.yearMin)
+                this.view.refillSelect('yearTo', this.curModel.yearMin, this.curModel.yearMax, this.curModel.yearMax)
+                this.view.drawGraph(this.curModel.yearMin, this.curModel.yearMax, obj)
+            })
+        }
+
+        yearChangeHandler(yearFrom, yearTo) {
+            this.curModel.get(yearFrom, yearTo).then((obj) => {
+                this.view.drawGraph(yearFrom, yearTo, obj)
+            })
+        }
+    }
+
+    let myIDBInstance;
 
     let applicationMode = TABLE_TEMPER
 
@@ -120,7 +433,7 @@
         const mySelect = document.getElementById(id)
         mySelect.length = 0
         const myFragment = document.createDocumentFragment()
-        for (let i = min; i <= max; i += 1) {
+        for (let i = parseInt(min, 10); i <= parseInt(max, 10); i += 1) {
             const mySelectOption = document.createElement('option')
             mySelectOption.value = mySelectOption.text = i
             myFragment.appendChild(mySelectOption)
@@ -130,7 +443,7 @@
     }
 
     // fill year dates
-    function fillYearDates(yearFrom, yearTo) {
+    function fillYearDatesSlow(yearFrom, yearTo) {
         // TODO: make without Date object
         const myStart = Date.now()
         const myResult = []
@@ -142,6 +455,26 @@
                 ('0' + myCurrentDate.getDate()).slice(-2)
             ].join('-'))
             myCurrentDate.setDate(myCurrentDate.getDate() + 1)
+        }
+        console.log('fillYearDates time: ', Date.now() - myStart, ' msec')
+        return myResult
+    }
+
+    function fillYearDates(yearFrom, yearTo) {
+        yearFrom = parseInt(yearFrom, 10)
+        yearTo = parseInt(yearTo, 10)
+        const myResult = []
+        const myMonthsData = { 1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31 }
+        const myStart = Date.now()
+        for (let year = yearFrom; year <= yearTo; year += 1) {
+            // leap correction
+            const isLeap = (0 === year % 4) && (0 !== year % 100) || (0 === year % 400)
+            myMonthsData[2] = (isLeap) ? 29 : 28
+            for (let month = 1; month <= 12; month += 1) {
+                for (let day = 1; day <= myMonthsData[month]; day += 1) {
+                    myResult.push(`${year}-${(month >= 10) ? month : (`0${month}`)}-${(day >= 10) ? day : (`0${day}`)}`)
+                }
+            }
         }
         console.log('fillYearDates time: ', Date.now() - myStart, ' msec')
         return myResult
@@ -167,25 +500,25 @@
         let myAvgSum = Number.NaN
         let myCnt = 0
         const myMinMaxCount = Date.now()
-        for (let i = 1; i < myLabels.length; i += 1) {
+        for (let i = 0; i < myLabels.length; i += 1) {
+            let myValue = dataObject[myLabels[i]]
+            if (typeof myValue !== 'undefined') {
+                myAvgSum = (!Number.isNaN(myAvgSum)) ? (myAvgSum + myValue) : myValue
+                myCnt += 1
+            }
+
             if (i % myAveragingInterval === 0) {
                 myValuesX.push(myLabels[i]);
 
                 let myAvgValue = (myCnt !== 0) ? myAvgSum / myCnt : Number.NaN
-                if (myAvgValue) {
+                if (!Number.isNaN(myAvgValue)) {
                     myValuesY[myLabels[i]] = myAvgValue
-                    myMin = Math.min(myMin, myAvgValue) || myAvgValue
-                    myMax = Math.max(myMax, myAvgValue) || myAvgValue
+                    myMin = (!Number.isNaN(myMin)) ? Math.min(myMin, myAvgValue) : myAvgValue
+                    myMax = (!Number.isNaN(myMax)) ? Math.max(myMax, myAvgValue) : myAvgValue
                 }
 
                 myAvgSum = Number.NaN
                 myCnt = 0
-            }
-
-            let myValue = dataObject[myLabels[i]]
-            if (myValue) {
-                myAvgSum = (myAvgSum) ? (myAvgSum + myValue) : myValue
-                myCnt += 1
             }
         }
         console.log('minmax count time: ', Date.now() - myMinMaxCount, ' msec', 'min:', myMin, 'max:', myMax)
@@ -217,7 +550,7 @@
         let myGapFound = true
         for (let i = 0; i < myValuesX.length; i += 1) {
             let myValue = myValuesY[myValuesX[i]]
-            if(myValue) {
+            if(!Number.isNaN(myValue)) {
                 if (myGapFound) {
                     // myCtx.moveTo(myX += myPixelFactor, getY(myValue))
                     myCtx.moveTo(getX(i, myValuesX.length), getY(myValue))
@@ -229,7 +562,7 @@
 
             } else {
                 myGapFound = true;
-                // console.log('gap found at:', myValuesX[i])
+                console.log('gap found at:', myValuesX[i])
             }
         }
         myCtx.stroke();
@@ -237,9 +570,29 @@
         console.log('TOTAL TIME ', Date.now() - myStartFetching, ' msec')
     }
 
-    let onSelectChange = trottle((event) => {
-        console.log('onSelectChange')
+    function showView(appMode) {
+        const myYearMin = parseInt((appMode === TABLE_TEMPER) ? localStorage.getItem('temperYearMin') : localStorage.getItem('precipYearMin'), 10)
+        const myYearMax = parseInt((appMode === TABLE_TEMPER) ? localStorage.getItem('temperYearMax') : localStorage.getItem('precipYearMax'), 10)
 
+        updateControls(appMode, myYearMin, myYearMax)
+        updateGraph(appMode, myYearMin, myYearMax)
+    }
+
+    const onButtonClick = (event) => {
+        applicationMode = (applicationMode === TABLE_TEMPER) ? TABLE_PREC : TABLE_TEMPER
+        showView(applicationMode)
+    }
+
+    function updateControls(appMode, yearFrom, yearTo) {
+        document.getElementById('button_temper').disabled = (appMode === TABLE_TEMPER)
+        document.getElementById('button_precip').disabled = (appMode === TABLE_PREC)
+
+        fillSelect('year_from', yearFrom, yearTo, yearFrom)
+        fillSelect('year_to', yearFrom, yearTo, yearTo)
+    }
+
+    function updateGraph(appMode, yearFrom, yearTo) {
+        console.log('updateGraph', yearFrom, yearTo)
         function prepareDataAndDraw (myYearFrom, myYearTo, rawData) {
             const myDataObject = {}
             rawData.forEach(el => {
@@ -248,6 +601,38 @@
             drawGraph(myYearFrom, myYearTo, myDataObject)
         }
 
+        const dataSource = (localStorage.getItem(appMode) === appMode && myIDBInstance) ? 'idb' : 'fetch'
+        // const dataSource = 'fetch'
+
+        if (dataSource === 'idb') {
+            let myIdbFetching = Date.now()
+            const myTransactionRead = myIDBInstance.transaction(applicationMode, 'readonly')
+            const myTable = myTransactionRead.objectStore(applicationMode)
+            // Query the data
+            const myIdbResult = myTable.getAll(
+                IDBKeyRange.bound(`${yearFrom}-01-01`, `${yearTo}-12-31`, false, false)
+            )
+
+            myIdbResult.onsuccess = () => {
+                console.log('IDB fetching time: ', Date.now() - myIdbFetching, ' msec')
+                prepareDataAndDraw(yearFrom, yearTo, myIdbResult.result)
+            }
+        } else {
+            console.warn('draw not yet loaded', appMode)
+            const myUrl = appMode === TABLE_TEMPER ? URL_TEMPERATURE : URL_PRECIPITATION
+            fetch(myUrl).then((response) => response.json()).then((jsonData) => {
+                if (Number.isNaN(yearFrom) || Number.isNaN(yearTo)) {
+                    const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+                    yearFrom = myYearFrom
+                    yearTo = myYearTo
+                }
+                drawGraph(yearFrom, yearTo, jsonData.filter((el) => (el.t >= `${yearFrom}-01-01`) && el.t <= `${yearTo}-12-31`).reduce((obj, el) => (obj[el.t] = el.v, obj), {}))
+            })
+        }
+
+    }
+
+    const onSelectChange = trottle((event) => {
         const mySelectFrom = document.getElementById('year_from')
         const mySelectTo = document.getElementById('year_to')
         if (mySelectFrom.value > mySelectTo.value && event.target === mySelectFrom) {
@@ -258,101 +643,75 @@
 
         let myYearFrom = mySelectFrom.value
         let myYearTo = mySelectTo.value
-        console.log(myYearFrom, myYearTo)
-
-
-        if (localStorage.getItem(applicationMode) !== '1') {
-            // use fetch data
-            console.log('using fetch data')
-            prepareDataAndDraw(myYearFrom, myYearTo, fetchJsonData[applicationMode])
-        } else {
-            console.log('using idb data')
-            // use idb data
-            if (!myIDBInstance) return
-            const myTransactionRead = myIDBInstance.transaction(applicationMode, 'readonly')
-            const myTable = myTransactionRead.objectStore(applicationMode)
-
-            // Query the data
-            const myIdbResult = myTable.getAll(
-                IDBKeyRange.bound('' + myYearFrom + '-01-01', '' + myYearTo + '-12-31', false, false)
-            )
-
-            myIdbResult.onsuccess = () => {
-                prepareDataAndDraw(myYearFrom, myYearTo, myIdbResult.result)
-            }
-        }
-
-
+        updateGraph(applicationMode, myYearFrom, myYearTo)
     }, SELECT_TROTTLE_TIME)
 
     let myStartFetching = Date.now()
 
-    const idbPromise = new Promise((resolve, reject) => {
-        // init DB
-        let openRequest = window.indexedDB.open(DB_NAME, 2)
-        openRequest.onupgradeneeded = (event) => {
-            console.log('upgrading database')
-            let db = event.target.result
-            // let db = openRequest.result;
-            if (!db.objectStoreNames.contains(TABLE_TEMPER)) {
-                console.log('creating table', TABLE_TEMPER)
-                // const TEMPER =
-                db.createObjectStore(TABLE_TEMPER, {keyPath: 't'})
-                // TEMPER.createIndex('IDX_YEAR', 'year')
-            }
-            if (!db.objectStoreNames.contains(TABLE_PREC)) {
-                console.log('creationg table', TABLE_PREC)
-                const PREC = db.createObjectStore(TABLE_PREC, {keyPath: 't'})
-                PREC.createIndex('IDX_YEAR', 'year')
-            }
-        };
+    // const idbPromise = new Promise((resolve, reject) => {
+    //     // init DB
+    //     let openRequest = window.indexedDB.open(DB_NAME, 1)
+    //     openRequest.onupgradeneeded = (event) => {
+    //         console.log('upgrading database')
+    //         let db = event.target.result
+    //         // let db = openRequest.result;
+    //         if (!db.objectStoreNames.contains(TABLE_TEMPER)) {
+    //             console.log('creating table', TABLE_TEMPER)
+    //             // const TEMPER =
+    //             db.createObjectStore(TABLE_TEMPER, {keyPath: 't'})
+    //             // TEMPER.createIndex('IDX_YEAR', 'year')
+    //         }
+    //         if (!db.objectStoreNames.contains(TABLE_PREC)) {
+    //             console.log('creationg table', TABLE_PREC)
+    //             const PREC = db.createObjectStore(TABLE_PREC, {keyPath: 't'})
+    //             PREC.createIndex('IDX_YEAR', 'year')
+    //         }
+    //     }
+    //
+    //     openRequest.onerror = (event) => {
+    //         // console.error('Error', event.target.result.error);
+    //         console.error('IDB Error', event.target.errorCode)
+    //         reject('IDB Error: ', event.target.errorCode)
+    //     }
+    //
+    //     openRequest.onsuccess = (event) => {
+    //         myIDBInstance = event.target.result
+    //         // const db = openRequest
+    //         console.log('connection established to:', '"' + DB_NAME + '"')
+    //
+    //         // myIDBInstance.onerror = (event) => {
+    //         //     console.log('db error', myIDBInstance.error)
+    //         // }
+    //
+    //         resolve(myIDBInstance)
+    //     }
+    // })
 
-        openRequest.onerror = (event) => {
-            // console.error('Error', event.target.result.error);
-            console.error('IDB Error', event.target.errorCode)
-            reject('IDB Error: ', event.target.errorCode)
-        }
-
-        openRequest.onsuccess = (event) => {
-            myIDBInstance = event.target.result
-            // const db = openRequest
-            console.log('connection established to:', '"' + DB_NAME + '"')
-
-            // myIDBInstance.onerror = (event) => {
-            //     console.log('db error', myIDBInstance.error)
-            // }
-
-            resolve(myIDBInstance)
-        };
-    })
-
-    function storeDataToIdb(tableName, jsonData) {
-        // fill IDB if connection ready
-        idbPromise.then((idbInstance) => {
-            console.log('json data length: ', jsonData.length)
-            const myTransaction = idbInstance.transaction(tableName, 'readwrite')
-
-            const myTxTemperTableRW = myTransaction.objectStore(tableName)
-
-            // TODO: make promise for filling IDB.
-            const myStartInserting1 = Date.now()
-            console.log('inserting...', tableName)
-            jsonData.forEach((element) => {
-                myTxTemperTableRW.put(element)
-            })
-
-            localStorage.setItem(tableName, '1')
-            fetchJsonData[tableName] = undefined
-            console.log('IDB inserting time: ', Date.now() - myStartInserting1, ' msec')
-        })
-    }
+    // function storeDataToIdb(tableName, jsonData) {
+    //     // fill IDB if connection ready
+    //     return idbPromise.then((idbInstance) => {
+    //         const myTransaction = idbInstance.transaction(tableName, 'readwrite')
+    //
+    //         const myTable = myTransaction.objectStore(tableName)
+    //
+    //         // TODO: make promise for filling IDB.
+    //         const myStartInserting1 = Date.now()
+    //         console.log('inserting...', tableName)
+    //         jsonData.forEach((element) => {
+    //             myTable.put(element)
+    //         })
+    //
+    //         localStorage.setItem(tableName, tableName)
+    //         console.log('IDB inserting time: ', Date.now() - myStartInserting1, ' msec')
+    //     })
+    // }
 
     function getYearMinMaxSlowButPrettier(jsonData) {
         const myArray = jsonData.map((el) => parseInt(el.t.substring(0, 4), 10))
         return [Math.min(...myArray), Math.max(...myArray)]
     }
 
-    function getYearMinMax(jsonData) {
+    function getYearMinMaxPoor(jsonData) {
         let myYearFrom = Number.NaN
         let myYearTo = Number.NaN
         jsonData.forEach((element) => {
@@ -363,48 +722,76 @@
         return [myYearFrom, myYearTo]
     }
 
-    function fetchAndStorePrecipitation() {
-        // load and store precipitation
-        fetch(URL_PRECIPITATION).then(
-            (response) => response.json()
-        ).then((jsonData) => {
-            fetchLoaded[TABLE_PREC] = true
-            fetchJsonData[TABLE_PREC] = jsonData
-
-            const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
-            localStorage.setItem('precipYearMin', '' + myYearFrom)
-            localStorage.setItem('precipYearMax', '' + myYearTo)
-            setTimeout(() => storeDataToIdb(TABLE_PREC, jsonData), 0)
+    function getYearMinMax(json) {
+        let yearFrom = Infinity
+        let yearTo = -Infinity
+        json.forEach((element) => {
+            const myYear = parseInt(element.t.substring(0, 4), 10)
+            yearFrom = Math.min(yearFrom, myYear)
+            yearTo = Math.max(yearTo, myYear)
         })
+        return [yearFrom, yearTo]
     }
 
+    // function fetchAndStorePrecipitation() {
+    //     // load and store precipitation
+    //     return fetch(URL_PRECIPITATION).then(
+    //         (response) => response.json()
+    //     ).then((jsonData) => {
+    //         const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+    //         localStorage.setItem('precipYearMin', '' + myYearFrom)
+    //         localStorage.setItem('precipYearMax', '' + myYearTo)
+    //         setTimeout(() => storeDataToIdb(TABLE_PREC, jsonData), 0)
+    //     })
+    // }
+
     window.addEventListener('load', function () {
-        fetch(URL_TEMPERATURE).then(
-            (response) => response.json()
-        ).then((jsonData) => {
-            fetchLoaded[TABLE_TEMPER] = true
-            fetchJsonData[TABLE_TEMPER] = jsonData
-            console.log('fetch time: ', Date.now() - myStartFetching, ' msec')
 
-            const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+        new Controller()
+        return
 
-            localStorage.setItem('temperYearMin', '' + myYearFrom)
-            localStorage.setItem('temperYearMax', '' + myYearTo)
-
-            drawGraph(myYearFrom, myYearTo, jsonData.reduce((obj, el) => (obj[el.t] = el.v, obj), {}))
-
-            fillSelect('year_from', myYearFrom, myYearTo, myYearFrom)
-            fillSelect('year_to', myYearFrom, myYearTo, myYearTo)
-
-            setTimeout(() => storeDataToIdb(TABLE_TEMPER, jsonData), 0)
-        }).then(() => {
-            fetchAndStorePrecipitation()
+        window.m = new Model({
+            name: TABLE_TEMPER,
+            url: URL_TEMPERATURE
         })
+
+        window.m.get().then((obj) => {
+            drawGraph(window.m.yearMin, window.m.yearMax, obj)
+        })
+
+        return
+
+        applicationMode = TABLE_TEMPER
+
+        if (localStorage.getItem(TABLE_TEMPER) === TABLE_TEMPER) {
+            // IDB data already loaded
+            showView(applicationMode)
+            if (localStorage.getItem(TABLE_PREC) !== TABLE_PREC) {
+                fetchAndStorePrecipitation()
+            }
+        } else {
+            fetch(URL_TEMPERATURE).then(
+                (response) => response.json()
+            ).then((jsonData) => {
+                console.log('fetch time: ', Date.now() - myStartFetching, ' msec')
+
+                const [myYearFrom, myYearTo] = getYearMinMax(jsonData)
+                localStorage.setItem('temperYearMin', '' + myYearFrom)
+                localStorage.setItem('temperYearMax', '' + myYearTo)
+
+                updateControls(applicationMode, myYearFrom, myYearTo)
+                drawGraph(myYearFrom, myYearTo, jsonData.reduce((obj, el) => (obj[el.t] = el.v, obj), {}))
+
+                setTimeout(() => storeDataToIdb(TABLE_TEMPER, jsonData), 0)
+            }).then(() =>  fetchAndStorePrecipitation())
+        }
 
         document.getElementById('year_from').addEventListener('change', onSelectChange)
         document.getElementById('year_to').addEventListener('change', onSelectChange)
+        document.querySelectorAll('#button_temper, #button_precip').forEach((el) => el.addEventListener('click', onButtonClick))
     })
 
+    // DEBUG SECTION
     document.getElementById('clearIDB').addEventListener('click', event => {
         console.log('local storage cleanup')
         localStorage.clear()
@@ -423,6 +810,7 @@
 
         event.preventDefault()
     })
+
 </script>
 </body>
 </html>
