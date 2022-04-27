@@ -1,24 +1,15 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>MQ Test Page</title>
-    <meta name="description" content="MQ test page">
-    <meta name="keywords" content="mq test page">
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=1024px, initial-scale=1">
-
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="MQ Test App" />
+    <title>MQ Test App</title>
     <style>
         body {
             margin: 0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-            'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-            sans-serif;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            font-family: 'Segoe UI', 'Roboto', 'Oxygen', 'Helvetica Neue', sans-serif;
         }
-
-        /** {*/
-        /*  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;*/
-        /*}*/
 
         * {
             box-sizing: border-box;
@@ -36,8 +27,8 @@
             margin-left: 10px;
         }
 
-        #button_precip, #button_temper, #button_drop_idb {
-            width: 160px;
+        .button {
+            width: 175px;
             border: 1px solid gray;
             margin: 5px;
             padding: 5px 10px;
@@ -45,8 +36,12 @@
             user-select: none;
         }
 
-        #button_precip.selected, #button_temper.selected {
+        .button.selected {
             background-color: lightgrey;
+        }
+
+        .button:hover {
+            box-shadow: rgba(0, 0, 0, 0.16) 0px 3px 6px, rgba(0, 0, 0, 0.23) 0px 3px 6px;
         }
 
         select {
@@ -55,13 +50,7 @@
             margin: 5px 0;
             cursor: pointer;
         }
-
-        .graph {
-            padding: 5px;
-            border: 1px solid gray;
-        }
     </style>
-
 </head>
 <body>
 <h1>Архив метеослужбы</h1>
@@ -83,21 +72,32 @@
         <canvas class="graph" height="320" width="480" id="graph" />
     </div>
 </div>
-<script>
-    import './index.css';
-
-    // TODO: check every requirement from MQ
-    // TODO: check against NATA rules
+<script type="text/javascript">
+    // TODO: add average line
+    // TODO: dont fall if IDB suddenly removed (done)
+    // TODO: Cache full result after first IDB select (done)
+    // TODO: check every requirement from MQ (donw)
+    // TODO: remove soap from graph (done)
+    // TODO: don't preload precipitation before switching to it (done)
 
     ///////////////////////////////////////////////////////////////////////////////
     // CONFIGURATION
-    const URL_TEMPERATURE = './temperature.json?r=' + Math.random()
-    const URL_PRECIPITATION = './precipitation.json?r=' + Math.random()
+    const URL_TEMPERATURE = './temperature.json'
+    // const URL_TEMPERATURE = './temperature.json?r=' + Math.random()
+    const URL_PRECIPITATION = './precipitation.json'
+    // const URL_PRECIPITATION = './precipitation.json?r=' + Math.random()
 
     const DB_NAME = 'store'
     const TABLE_TEMPER = 'temperature'
     const TABLE_PREC = 'precipitation'
-    const SELECT_TROTTLE_TIME = 180 // select boxes trottle time in milliseconds
+
+    // selectboxes trottle time in milliseconds
+    const SELECT_TROTTLE_TIME = 180
+
+    // IndexedDB initial inserting batch size. Number of rows inserted in one transaction. To avoid UI block.
+    // Size will ajusted depend on system performance
+    const INITIAL_BATCH_SIZE = 200 // records to insert per batch
+    const MAX_IDLE_TIME_WINDOW = 50 // max batch processing time (msec)
 
     ///////////////////////////////////////////////////////////////////////////////
     // ENTRY POINT
@@ -147,8 +147,15 @@
                     }
 
                     openRequest.onsuccess = (event) => {
+                        const db = event.target.result
+                        db.onversionchange = () => {
+                            localStorage.clear()
+                            db.close();
+                            window.location.reload()
+                            alert('Database was removed. Page will be reloaded.')
+                        }
                         console.log('connection established to:', '"' + DB_NAME + '"')
-                        resolve(event.target.result)
+                        resolve(db)
                     }
                 })
             }
@@ -157,6 +164,9 @@
     }
 
     class Model {
+
+        idbResultCache
+
         constructor(params) {
             this.name = params.name
             this.url = params.url
@@ -198,24 +208,38 @@
                 // fill IDB then IDB connection ready
                 this.storingPromise = new Adapter().getConnection().then((idbInstance) => {
                     return new Promise((resolve, reject) => {
-                        const myTransaction = idbInstance.transaction(this.name, 'readwrite')
-                        const myTable = myTransaction.objectStore(this.name)
-
-                        myTransaction.oncomplete = () => {
-                            localStorage.setItem(`${this.name}_stored`, 'stored')
-                            resolve()
-                        }
-
-                        myTransaction.onabort = () => {
-                            reject(myTransaction.error)
-                        }
+                        let i = 0
+                        let myPutObject
 
                         const myTimer = Date.now()
-                        console.log('inserting...', this.name)
-                        json.forEach((element) => {
-                            myTable.put(element)
-                        })
-                        console.log('IDB inserting time: ', Date.now() - myTimer, ' msec')
+                        const hardworkBinded = hardWorkFunction.bind(this)
+                        let batchSize = INITIAL_BATCH_SIZE
+
+                        requestIdleCallback(hardworkBinded)
+
+                        function hardWorkFunction() {
+                            const myTransaction = idbInstance.transaction(this.name, 'readwrite')
+                            const myTable = myTransaction.objectStore(this.name)
+                            myTransaction.onabort = reject
+
+                            const myBatchTimer = Date.now()
+                            for (let idx = i; idx < json.length && idx - i < batchSize; idx += 1) {
+                                myPutObject = myTable.put(json[idx])
+                            }
+                            i += batchSize
+                            batchSize *= (Date.now() - myBatchTimer < MAX_IDLE_TIME_WINDOW) ? 2 : 1 // sometimes increase batch size
+                            console.log('IDB batch inserting time:', Date.now() - myBatchTimer, 'msec. Batch size:', batchSize, 'TABLE:', this.name)
+
+                            if (i < json.length) {
+                                myPutObject.onsuccess = () => requestIdleCallback(hardworkBinded)
+                            } else {
+                                resolve()
+                                this.stored = true
+                                localStorage.setItem(`${this.name}_stored`, 'stored')
+                                console.log('IDB inserting time: ', Date.now() - myTimer, ' msec', 'TABLE:', this.name)
+                            }
+                        }
+
                     })
                 })
             }
@@ -225,25 +249,27 @@
         async get(yearFrom, yearTo) {
             yearFrom = yearFrom || this.yearMin
             yearTo = yearTo || this.yearMax
-
-            const reduceFn = (obj, el) => (obj[el.t] = el.v, obj)
+            const reduceFn = (obj, el) => (obj[el.t] = el.v, obj) // DANGER! Comma operaton in action!
 
             // super lazy load
-            if (this.stored) {
-                // select from IDB
+            if (this.stored) { // select from IDB
+                if (this.idbResultCache) return this.idbResultCache // that should be prohibited by requirements to cache IDB result, but...
+
                 const myIDBInstance = await new Adapter().getConnection()
                 return new Promise((resolve, reject) => {
                     let myIdbFetching = Date.now()
-                    const myTransactionRead = myIDBInstance.transaction(this.name, 'readonly')
-                    const myTable = myTransactionRead.objectStore(this.name)
-                    // Query the data
-                    const myIdbResult = myTable.getAll(IDBKeyRange.bound(`${yearFrom}-01-01`, `${yearTo}-12-31`, false, false))
+                    const myTable = myIDBInstance.transaction(this.name, 'readonly').objectStore(this.name)
+                    const myIdbResult = (yearFrom === this.yearMin && yearTo === this.yearMax)
+                        ? myTable.getAll() // that should be faster
+                        : myTable.getAll(IDBKeyRange.bound(`${yearFrom}-01-01`, `${yearTo}-12-31`, false, false))
                     myIdbResult.onsuccess = () => {
                         console.log('IDB fetching time: ', Date.now() - myIdbFetching, ' msec')
-                        resolve(myIdbResult.result.reduce(reduceFn, {}))
+                        const myResult = myIdbResult.result.reduce(reduceFn, {})
+                        this.idbResultCache = myResult
+                        resolve(myResult)
                     }
                 })
-            } else if (this.loaded === false) {
+            } else if (this.loaded === false) { // no IDB --> so we should use fetch
                 this.loaded = fetch(this.url).then((result) => result.json())
             }
 
@@ -252,9 +278,8 @@
                 const [myYearFrom, myYearTo] = this.#getYearMinMax(json)
                 this.yearMin = myYearFrom
                 this.yearMax = myYearTo
-                setTimeout(() => this.#storeDataToIdb(json), 500) // postpone inserting to make smoother UX
-                // TODO: possible should be filtered
-                return json.reduce(reduceFn, {})
+                this.#storeDataToIdb(json)
+                return json.filter((el) => (el.t >= `${yearFrom}-01-01` && el.t <= `${yearTo}-12-31`)).reduce(reduceFn, {})
             })
         }
     }
@@ -268,7 +293,9 @@
             document.getElementById('year_from').addEventListener('change', this.onSelectChangeHandler())
             document.getElementById('year_to').addEventListener('change', this.onSelectChangeHandler())
             document.getElementById('button_temper').addEventListener('click', this.onButtonClickHandler.bind(this, TABLE_TEMPER))
+            document.getElementById('button_temper').addEventListener('keypress', this.onButtonClickHandler.bind(this, TABLE_TEMPER))
             document.getElementById('button_precip').addEventListener('click', this.onButtonClickHandler.bind(this, TABLE_PREC))
+            document.getElementById('button_precip').addEventListener('keypress', this.onButtonClickHandler.bind(this, TABLE_PREC))
         }
 
         // draw graph
@@ -277,6 +304,8 @@
             const myCtx = myGraph.getContext('2d')
             myCtx.clearRect(0, 0, myGraph.width, myGraph.height)
             myCtx.strokeRect(0, 0, myGraph.width, myGraph.height)
+
+            myCtx.lineWidth = 0.5
 
             const myLabels = utils.getYearDates(yearFrom, yearTo)
             const myValuesY = {}
@@ -323,8 +352,8 @@
             myCtx.stroke()
 
             // myCtx.font = "14px serif";
-            myCtx.fillText('' + Math.round(myMax), 5, 14);
-            myCtx.fillText('' + Math.round(myMin), 5, myGraph.height - 5);
+            myCtx.fillText((!Number.isNaN(myMax)) ? '' + Math.round(myMax) : '-', 5, 14);
+            myCtx.fillText((!Number.isNaN(myMin)) ? '' + Math.round(myMin) : '-', 5, myGraph.height - 5);
 
             function getY(value) {
                 const myStrengthFactor = myGraph.height / (myMax - myMin)
@@ -341,6 +370,7 @@
             const myPlottingTime = Date.now()
 
             let myGapFound = true
+
             for (let i = 0; i < myValuesX.length; i += 1) {
                 let myValue = myValuesY[myValuesX[i]]
                 if(!Number.isNaN(myValue)) {
@@ -424,11 +454,11 @@
         })
 
         constructor() {
-            this.modeChangeHandler(TABLE_TEMPER).then(() => this.percipitationModel.get())
+            // this.modeChangeHandler(TABLE_TEMPER).then(() => this.percipitationModel.get())
+            this.modeChangeHandler(TABLE_TEMPER)
         }
 
         modeChangeHandler(mode) {
-            console.log('changing mode')
             this.curModel = (mode === TABLE_TEMPER) ? this.temeratureModel : this.percipitationModel
             return this.curModel.get().then((obj) => {
                 this.view.updateButons(mode)
@@ -468,7 +498,7 @@
             }
             return trottled
         },
-        getYearDates: function (yearFrom, yearTo) {
+        getYearDates: function (yearFrom, yearTo) { // full dates list array without Date() object using (faster)
             yearFrom = parseInt(yearFrom, 10)
             yearTo = parseInt(yearTo, 10)
             const result = []
@@ -479,7 +509,7 @@
                 monthsDays[2] = (isLeap) ? 29 : 28
                 for (let month = 1; month <= 12; month += 1) {
                     for (let day = 1; day <= monthsDays[month]; day += 1) {
-                        result.push(`${year}-${(month >= 10) ? month : (`0${month}`)}-${(day >= 10) ? day : (`0${day}`)}`)
+                        result.push(`${year}-${(month >= 10) ? month : (`0${month}`)}-${(day >= 10) ? day : (`0${day}`)}`) // fastest YYYY-MM-DD generation template
                     }
                 }
             }
@@ -489,24 +519,11 @@
 
     ///////////////////////////////////////////////////////////////////////////////
     // DEBUG SECTION
-
     document.getElementById('button_drop_idb').addEventListener('click', event => {
-        console.log('local storage cleanup')
-        localStorage.clear()
-
+        // localStorage.clear()
         console.log('database ', DB_NAME, ' deleting...')
-
-        const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
-        deleteRequest.onerror = function () {
-            console.error("Error", deleteRequest.error)
-        }
-
-        deleteRequest.onsuccess = function () {
-            console.log('database deleted')
-            console.log(deleteRequest)
-        }
-
-        event.preventDefault()
+        indexedDB.deleteDatabase(DB_NAME)
+        window.location.reload()
     })
 </script>
 </body>
