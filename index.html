@@ -91,6 +91,8 @@
     const TABLE_TEMPER = 'temperature'
     const TABLE_PREC = 'precipitation'
 
+    const USE_IDB_RESULT_FULL_CACHE = true
+
     // selectboxes trottle time in milliseconds
     const SELECT_TROTTLE_TIME = 180
 
@@ -253,19 +255,21 @@
 
             // super lazy load
             if (this.stored) { // select from IDB
-                if (this.idbResultCache) return this.idbResultCache // that should be prohibited by requirements to cache IDB result, but...
+                if (USE_IDB_RESULT_FULL_CACHE && this.idbResultCache) return this.idbResultCache // that should be prohibited by requirements to cache IDB result, but...
 
                 const myIDBInstance = await new Adapter().getConnection()
                 return new Promise((resolve, reject) => {
                     let myIdbFetching = Date.now()
                     const myTable = myIDBInstance.transaction(this.name, 'readonly').objectStore(this.name)
-                    const myIdbResult = (yearFrom === this.yearMin && yearTo === this.yearMax)
+                    const myIdbResult = (USE_IDB_RESULT_FULL_CACHE || (yearFrom === this.yearMin && yearTo === this.yearMax))
                         ? myTable.getAll() // that should be faster
                         : myTable.getAll(IDBKeyRange.bound(`${yearFrom}-01-01`, `${yearTo}-12-31`, false, false))
                     myIdbResult.onsuccess = () => {
                         console.log('IDB fetching time: ', Date.now() - myIdbFetching, ' msec')
                         const myResult = myIdbResult.result.reduce(reduceFn, {})
-                        this.idbResultCache = myResult
+                        if (USE_IDB_RESULT_FULL_CACHE && (yearFrom === this.yearMin && yearTo === this.yearMax)) { // cache only full interval
+                            this.idbResultCache = myResult
+                        }
                         resolve(myResult)
                     }
                 })
@@ -304,7 +308,6 @@
             const myGraph = document.getElementById('graph')
             const graphWidth = myGraph.offsetWidth
             const graphHeight = myGraph.offsetHeight
-            console.log('devicePixelRatio', window.devicePixelRatio)
             const devicePixelRatio = 2 // window.devicePixelRatio
             myGraph.style.width = `${graphWidth}px`
             myGraph.style.height = `${graphHeight}px`
@@ -326,16 +329,12 @@
             myCtx.lineWidth = 1
 
             const myLabels = utils.getYearDates(yearFrom, yearTo)
-            const myValuesY = {}
             const myValuesYMin = {}
             const myValuesYMax = {}
             const myValuesX = []
 
-            console.log('from', yearFrom, 'to', yearTo)
-
             const myPixelFactor = 1
             const myAveragingInterval = Math.round(myLabels.length / graphWidth) * myPixelFactor || 1
-            console.log('averagingInterval', myAveragingInterval)
 
             // count min max
             let myMin = Infinity
@@ -359,7 +358,6 @@
                     myValuesYMin[myLabels[i]] = myLocalMin
                     myLocalMax = -Infinity
                     myLocalMin = Infinity
-
                 }
             }
             console.log('minmax count time: ', Date.now() - myMinMaxCount, ' msec', 'min:', myMin, 'max:', myMax)
@@ -383,13 +381,11 @@
                 return (graphWidth / count) * n
             }
 
-            // let myX = 0;
             myCtx.beginPath();
             myCtx.moveTo(0, graphHeight / 2);
             const myPlottingTime = Date.now()
             let myValueYFrom = Number.NaN
             let myValueYTo = Number.NaN
-
             let myPrevValueY = 0
 
             for (let i = 0; i < myValuesX.length; i += 1) {
