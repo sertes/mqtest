@@ -56,18 +56,14 @@
 <h1>Архив метеослужбы</h1>
 <div class="container">
     <div class="left">
-        <div id="button_temper" class="button" tabindex="40">Температура</div>
-        <div id="button_precip" class="button" tabindex="50">Осадки</div>
-        <div id="button_drop_idb" class="button">DBG: RESET CACHE</div>
+        <div id="button_temper" class="button" role="button" aria-label="Температура" tabindex="40">Температура</div>
+        <div id="button_precip" class="button" role="button" aria-label="Осадки" tabindex="50">Осадки</div>
+        <div id="button_drop_idb" class="button" role="button" aria-label="IDB Cache Cleanup">DBG: RESET CACHE</div>
     </div>
     <div class="content">
         <div class="filters">
-            <select id="year_from" tabindex="10">
-                <option>1881</option>
-            </select>
-            <select id="year_to" tabindex="20">
-                <option>2006</option>
-            </select>
+            <select id="year_from" aria-label="Year From" tabindex="10"></select>
+            <select id="year_to" aria-label="Year To" tabindex="20"></select>
         </div>
         <canvas class="graph" height="320" width="480" id="graph" />
     </div>
