@@ -285,6 +285,10 @@
     }
 
     class View {
+
+        graphWidth
+        graphHeight
+
         constructor(params) {
             this.mode = params.mode || TABLE_TEMPER
             this.modeChangeHandler = params.modeChangeHandler
@@ -296,97 +300,107 @@
             document.getElementById('button_temper').addEventListener('keypress', this.onButtonClickHandler.bind(this, TABLE_TEMPER))
             document.getElementById('button_precip').addEventListener('click', this.onButtonClickHandler.bind(this, TABLE_PREC))
             document.getElementById('button_precip').addEventListener('keypress', this.onButtonClickHandler.bind(this, TABLE_PREC))
+
+            const myGraph = document.getElementById('graph')
+            const graphWidth = myGraph.offsetWidth
+            const graphHeight = myGraph.offsetHeight
+            console.log('devicePixelRatio', window.devicePixelRatio)
+            const devicePixelRatio = 2 // window.devicePixelRatio
+            myGraph.style.width = `${graphWidth}px`
+            myGraph.style.height = `${graphHeight}px`
+            myGraph.width = graphWidth * devicePixelRatio
+            myGraph.height = graphHeight * devicePixelRatio
         }
 
         // draw graph
         drawGraph(yearFrom, yearTo, dataObject) {
             const myGraph = document.getElementById('graph')
             const myCtx = myGraph.getContext('2d')
-            myCtx.clearRect(0, 0, myGraph.width, myGraph.height)
-            myCtx.strokeRect(0, 0, myGraph.width, myGraph.height)
 
-            myCtx.lineWidth = 0.5
+            const graphWidth = myGraph.width
+            const graphHeight = myGraph.height
+            console.log('width:', graphWidth, 'height:', graphHeight)
+
+            myCtx.clearRect(0, 0, graphWidth, graphHeight)
+            myCtx.strokeRect(0, 0, graphWidth, graphHeight)
+
+            myCtx.lineWidth = 1
 
             const myLabels = utils.getYearDates(yearFrom, yearTo)
             const myValuesY = {}
+            const myValuesYMin = {}
+            const myValuesYMax = {}
             const myValuesX = []
 
             console.log('from', yearFrom, 'to', yearTo)
 
             const myPixelFactor = 1
-            const myAveragingInterval = Math.round(myLabels.length / myGraph.width) * myPixelFactor
+            const myAveragingInterval = Math.round(myLabels.length / graphWidth) * myPixelFactor || 1
+            console.log('averagingInterval', myAveragingInterval)
 
             // count min max
-            let myMin = Number.NaN
-            let myMax = Number.NaN
-            let myAvgSum = Number.NaN
-            let myCnt = 0
+            let myMin = Infinity
+            let myMax = -Infinity
+            let myLocalMin = Infinity
+            let myLocalMax = -Infinity
             const myMinMaxCount = Date.now()
             for (let i = 0; i < myLabels.length; i += 1) {
                 let myValue = dataObject[myLabels[i]]
                 if (typeof myValue !== 'undefined') {
-                    myAvgSum = (!Number.isNaN(myAvgSum)) ? (myAvgSum + myValue) : myValue
-                    myCnt += 1
+                    myLocalMin = Math.min(myLocalMin, myValue)
+                    myLocalMax = Math.max(myLocalMax, myValue)
+                    myMin =  Math.min(myMin, myLocalMin)
+                    myMax = Math.max(myMax, myLocalMax)
                 }
 
                 if (i % myAveragingInterval === 0) {
                     myValuesX.push(myLabels[i]);
 
-                    let myAvgValue = (myCnt !== 0) ? myAvgSum / myCnt : Number.NaN
-                    if (!Number.isNaN(myAvgValue)) {
-                        myValuesY[myLabels[i]] = myAvgValue
-                        myMin = (!Number.isNaN(myMin)) ? Math.min(myMin, myAvgValue) : myAvgValue
-                        myMax = (!Number.isNaN(myMax)) ? Math.max(myMax, myAvgValue) : myAvgValue
-                    }
+                    myValuesYMax[myLabels[i]] = myLocalMax
+                    myValuesYMin[myLabels[i]] = myLocalMin
+                    myLocalMax = -Infinity
+                    myLocalMin = Infinity
 
-                    myAvgSum = Number.NaN
-                    myCnt = 0
                 }
             }
+            console.log('valuesX.length', myValuesX.length)
             console.log('minmax count time: ', Date.now() - myMinMaxCount, ' msec', 'min:', myMin, 'max:', myMax)
 
             //draw x axis
             myCtx.beginPath()
             myCtx.moveTo(0, getY(0))
-            myCtx.lineTo(myGraph.width, getY(0))
+            myCtx.lineTo(graphWidth, getY(0))
             myCtx.stroke()
 
-            // myCtx.font = "14px serif";
+            // myCtx.font = "16px serif";
             myCtx.fillText((!Number.isNaN(myMax)) ? '' + Math.round(myMax) : '-', 5, 14);
-            myCtx.fillText((!Number.isNaN(myMin)) ? '' + Math.round(myMin) : '-', 5, myGraph.height - 5);
+            myCtx.fillText((!Number.isNaN(myMin)) ? '' + Math.round(myMin) : '-', 5, graphHeight - 5);
 
             function getY(value) {
-                const myStrengthFactor = myGraph.height / (myMax - myMin)
-                return myGraph.height - (0 - myMin + value) * myStrengthFactor
+                const myStrengthFactor = graphHeight / (myMax - myMin)
+                return graphHeight - (0 - myMin + value) * myStrengthFactor
             }
 
             function getX(n, count) {
-                return (myGraph.width / count) * n
+                return (graphWidth / count) * n
             }
 
             // let myX = 0;
             myCtx.beginPath();
-            myCtx.moveTo(0, myGraph.height / 2);
+            myCtx.moveTo(0, graphHeight / 2);
             const myPlottingTime = Date.now()
-
-            let myGapFound = true
+            let myPrevValueMin = Number.NaN
+            let myPrevValueMax = Number.NaN
 
             for (let i = 0; i < myValuesX.length; i += 1) {
-                let myValue = myValuesY[myValuesX[i]]
-                if(!Number.isNaN(myValue)) {
-                    if (myGapFound) {
-                        // myCtx.moveTo(myX += myPixelFactor, getY(myValue))
-                        myCtx.moveTo(getX(i, myValuesX.length), getY(myValue))
-                        myGapFound = false
-                    } else {
-                        myCtx.lineTo(getX(i, myValuesX.length), getY(myValue))
-                        // myCtx.lineTo(myX += myPixelFactor, getY(myValue))
-                    }
-
-                } else {
-                    myGapFound = true;
-                    console.log('gap found at:', myValuesX[i])
+                let myValueMin = myValuesYMin[myValuesX[i]]
+                let myValueMax = myValuesYMax[myValuesX[i]]
+                if (myValueMin !== myValueMax) {
+                    myCtx.lineTo(getX(i, myValuesX.length), getY(myValueMax))
                 }
+                myCtx.lineTo(getX(i, myValuesX.length), getY(myValueMin))
+                myPrevValueMin = myValueMin
+                myPrevValueMax = myValueMax
             }
             myCtx.stroke();
             console.log('plotting time: ', Date.now() - myPlottingTime, ' msec')
