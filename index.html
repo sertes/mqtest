@@ -267,7 +267,7 @@
                     myIdbResult.onsuccess = () => {
                         console.log('IDB fetching time: ', Date.now() - myIdbFetching, ' msec')
                         const myResult = myIdbResult.result.reduce(reduceFn, {})
-                        if (USE_IDB_RESULT_FULL_CACHE && (yearFrom === this.yearMin && yearTo === this.yearMax)) { // cache only full interval
+                        if (USE_IDB_RESULT_FULL_CACHE) { // cache only full interval
                             this.idbResultCache = myResult
                         }
                         resolve(myResult)
