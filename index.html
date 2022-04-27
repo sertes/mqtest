@@ -319,7 +319,6 @@
 
             const graphWidth = myGraph.width
             const graphHeight = myGraph.height
-            console.log('width:', graphWidth, 'height:', graphHeight)
 
             myCtx.clearRect(0, 0, graphWidth, graphHeight)
             myCtx.strokeRect(0, 0, graphWidth, graphHeight)
@@ -363,7 +362,6 @@
 
                 }
             }
-            console.log('valuesX.length', myValuesX.length)
             console.log('minmax count time: ', Date.now() - myMinMaxCount, ' msec', 'min:', myMin, 'max:', myMax)
 
             //draw x axis
@@ -389,18 +387,23 @@
             myCtx.beginPath();
             myCtx.moveTo(0, graphHeight / 2);
             const myPlottingTime = Date.now()
-            let myPrevValueMin = Number.NaN
-            let myPrevValueMax = Number.NaN
+            let myValueYFrom = Number.NaN
+            let myValueYTo = Number.NaN
+
+            let myPrevValueY = 0
 
             for (let i = 0; i < myValuesX.length; i += 1) {
                 let myValueMin = myValuesYMin[myValuesX[i]]
                 let myValueMax = myValuesYMax[myValuesX[i]]
+
+                myValueYFrom = myPrevValueY - myValueMin < myPrevValueY - myValueMax ? myValueMin : myValueMax
+                myValueYTo = myPrevValueY - myValueMin < myPrevValueY - myValueMax ? myValueMax : myValueMin
+
                 if (myValueMin !== myValueMax) {
-                    myCtx.lineTo(getX(i, myValuesX.length), getY(myValueMax))
+                    myCtx.lineTo(getX(i, myValuesX.length), getY(myValueYFrom))
                 }
-                myCtx.lineTo(getX(i, myValuesX.length), getY(myValueMin))
-                myPrevValueMin = myValueMin
-                myPrevValueMax = myValueMax
+                myCtx.lineTo(getX(i, myValuesX.length), getY(myValueYTo))
+                myPrevValueY = myValueYTo
             }
             myCtx.stroke();
             console.log('plotting time: ', Date.now() - myPlottingTime, ' msec')
